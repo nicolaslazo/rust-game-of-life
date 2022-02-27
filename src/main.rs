@@ -61,12 +61,13 @@ fn main() -> Result<(), Box<dyn error::Error>> {
 fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,
     mut app: App,
-    tick_rate: Duration,
+    mut tick_rate: Duration,
 ) -> Result<(), Box<dyn error::Error>> {
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || handle_game_events(tx, tick_rate));
 
+    let mut game_running = false;
     let mut exit = false;
 
     loop {
@@ -80,32 +81,42 @@ fn run_app<B: Backend>(
                 let block = Block::default().borders(Borders::ALL);
                 f.render_widget(block, chunks[0]);
 
+                let run_pause_str = match &game_running {
+                    false => "  Run",
+                    true => "  Pause",
+                };
+
                 let instructions = Paragraph::new(vec![
                     Spans::from(vec![Span::raw(" [Left click]")]),
-                    Spans::from(vec![Span::raw(" Add cell")]),
+                    Spans::from(vec![Span::raw("  Add cell")]),
                     Spans::from(vec![Span::raw("")]),
                     Spans::from(vec![Span::raw(" [Right click]")]),
-                    Spans::from(vec![Span::raw(" Delete cell")]),
+                    Spans::from(vec![Span::raw("  Delete cell")]),
                     Spans::from(vec![Span::raw("")]),
                     Spans::from(vec![Span::raw(" [Enter]")]),
-                    Spans::from(vec![Span::raw(" Run")]),
+                    Spans::from(vec![Span::raw(run_pause_str)]),
                     Spans::from(vec![Span::raw("")]),
                     Spans::from(vec![Span::raw(" [-, +]")]),
-                    Spans::from(vec![Span::raw(" Tick rate = 250")]),
+                    Spans::from(vec![Span::raw(format!(
+                        "  Tick rate = {}",
+                        &tick_rate.as_millis()
+                    ))]),
                     Spans::from(vec![Span::raw("")]),
                     Spans::from(vec![Span::raw(" [q]")]),
-                    Spans::from(vec![Span::raw(" Exit")]),
+                    Spans::from(vec![Span::raw("  Exit")]),
                 ])
                 .alignment(Alignment::Left)
                 .block(Block::default().borders(Borders::ALL).title("Controls"));
                 f.render_widget(instructions, chunks[1]);
 
                 match rx.recv().unwrap() {
-                    GameEvent::Input(event) => {
-                        if let KeyCode::Char('q') = event.code {
-                            exit = true
-                        }
-                    }
+                    GameEvent::Input(event) => match event.code {
+                        KeyCode::Char('q') => exit = true,
+                        KeyCode::Char('+') => tick_rate += Duration::from_millis(10),
+                        KeyCode::Char('-') => tick_rate -= Duration::from_millis(10),
+                        KeyCode::Enter => game_running = !game_running,
+                        _ => {}
+                    },
                     GameEvent::Tick => app.on_tick(),
                 }
             })
