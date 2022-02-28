@@ -1,5 +1,8 @@
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, MouseButton,
+        MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -12,7 +15,7 @@ use std::{
 use tui::{
     backend::{Backend, CrosstermBackend},
     layout::Layout,
-    layout::{Alignment, Constraint, Direction},
+    layout::{Alignment, Constraint, Direction, Rect},
     style::Color,
     text::{Span, Spans},
     widgets::{
@@ -22,33 +25,49 @@ use tui::{
     Frame, Terminal,
 };
 
+struct ClickPosition {
+    x: u16,
+    y: u16,
+}
+
 enum GameEvent {
     KeyInput(KeyEvent),
+    LeftClick(ClickPosition),
+    RightClick(ClickPosition),
     Tick,
-    Resize(usize, usize),
+    Resize(Rect),
 }
 
 struct App {
     state: Vec<Vec<bool>>,
     running: bool,
-    dimensions: Option<(usize, usize)>,
+    dimensions: Rect,
     tick_rate: Duration,
 }
 
 impl App {
-    fn new() -> App {
+    fn new<B: Backend>(frame: Frame<B>) -> App {
         App {
-            // Kind of sucks how the app starts in an invalid state that shouldn't exist
-            // but we can't reserve any memory until the UI is initialised and we know our dimensions
             state: Vec::new(),
             running: false,
-            dimensions: None,
+            dimensions: App::init_dimensions(frame),
             tick_rate: Duration::from_millis(250),
         }
     }
 
-    fn resize(&mut self, w: usize, h: usize) {
-        self.state = vec![vec![false; w]; h];
+    fn init_dimensions<B: Backend>(frame: Frame<B>) -> Rect {
+	let chunks = Layout::default()
+	    .direction(Direction::Horizontal)
+	    .margin(2)
+	    .constraints([Constraint::Percentage(85), Constraint::Percentage(15)].as_ref())
+	    .split(frame.size());
+
+        return chunks[0];
+    }
+
+    fn resize(&mut self, rect: Rect) {
+        self.state = vec![vec![false; rect.width.into()]; rect.height.into()];
+        self.dimensions = rect;
     }
 
     fn on_tick(&mut self) {}
@@ -71,6 +90,13 @@ impl App {
             })
             .collect()
     }
+
+    fn add_cell(&mut self, pos: ClickPosition) {
+        self.state[pos.x as usize][pos.y as usize] = true;
+    }
+    fn remove_cell(&mut self, pos: ClickPosition) {
+        self.state[pos.x as usize][pos.y as usize] = false;
+    }
 }
 
 fn main() -> Result<(), Box<dyn error::Error>> {
@@ -81,7 +107,7 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let app = App::new();
+    let app = App::new(terminal.get_frame());
     let res = run_app(&mut terminal, app);
 
     disable_raw_mode()?;
@@ -125,8 +151,14 @@ fn run_app<B: Backend>(
                 _ => {}
             },
 
+            GameEvent::LeftClick(position) if !app.running => app.add_cell(position),
+
+            GameEvent::RightClick(position) if !app.running => app.remove_cell(position),
+
             GameEvent::Tick => app.on_tick(),
-            GameEvent::Resize(w, h) => app.resize(w, h),
+            GameEvent::Resize(rect) => app.resize(rect),
+
+            _ => {}
         }
 
         if exit {
@@ -146,9 +178,33 @@ fn handle_game_events(tx: Sender<GameEvent>, tick_rate: &Duration) {
             .unwrap_or_else(|| Duration::from_secs(0));
 
         if event::poll(timeout).expect("Events are properly polled") {
-            if let Event::Key(key) = event::read().expect("Key inputs are detected") {
-                tx.send(GameEvent::KeyInput(key))
-                    .expect("GameEvent inputs can be sent to the consumer");
+            match event::read().expect("Key inputs are detected") {
+                Event::Key(key) => {
+                    tx.send(GameEvent::KeyInput(key))
+                        .expect("GameEvent keys can be sent to the consumer");
+                }
+
+                Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column,
+                    row,
+                    ..
+                }) => {
+                    tx.send(GameEvent::LeftClick(ClickPosition { x: column, y: row }))
+                        .expect("Left clicks can be sent to the consumer");
+                }
+
+                Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Right),
+                    column,
+                    row,
+                    ..
+                }) => {
+                    tx.send(GameEvent::RightClick(ClickPosition { x: column, y: row }))
+                        .expect("Right clicks can be sent to the consumer");
+                }
+
+                _ => {}
             }
         }
 
@@ -165,21 +221,17 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App, event_tx: &mut Sender<GameEve
         .constraints([Constraint::Percentage(85), Constraint::Percentage(15)].as_ref())
         .split(f.size());
 
-    let new_game_dimensions = (chunks[0].width as usize, chunks[0].height as usize);
-    if Some(new_game_dimensions) != app.dimensions
-        && event_tx
-            .send(GameEvent::Resize(
-                new_game_dimensions.0,
-                new_game_dimensions.1,
-            ))
-            .is_ok()
-    {
-        app.dimensions = Some(new_game_dimensions);
+    if chunks[0] != app.dimensions {
+        event_tx
+            .send(GameEvent::Resize(chunks[0]))
+            .expect("Can send resize events");
     }
 
     let canvas = Canvas::default() // Game rendering
         .block(Block::default().borders(Borders::ALL))
-        .marker(tui::symbols::Marker::Braille)
+        .x_bounds([0., app.dimensions.right() as f64])
+        .y_bounds([0., app.dimensions.bottom() as f64])
+        .marker(tui::symbols::Marker::Block)
         .paint(|ctx| {
             ctx.draw(&Points {
                 coords: app.cells().as_slice(),
