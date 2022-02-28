@@ -47,22 +47,18 @@ struct App {
 
 impl App {
     fn new<B: Backend>(frame: Frame<B>) -> App {
+        let dimensions = Layout::default()
+            .direction(Direction::Horizontal)
+            .margin(2)
+            .constraints([Constraint::Percentage(85), Constraint::Percentage(15)].as_ref())
+            .split(frame.size())[0];
+
         App {
-            state: Vec::new(),
+            state: vec![vec![false; dimensions.width.into()]; dimensions.height.into()],
             running: false,
-            dimensions: App::init_dimensions(frame),
+            dimensions,
             tick_rate: Duration::from_millis(250),
         }
-    }
-
-    fn init_dimensions<B: Backend>(frame: Frame<B>) -> Rect {
-	let chunks = Layout::default()
-	    .direction(Direction::Horizontal)
-	    .margin(2)
-	    .constraints([Constraint::Percentage(85), Constraint::Percentage(15)].as_ref())
-	    .split(frame.size());
-
-        return chunks[0];
     }
 
     fn resize(&mut self, rect: Rect) {
@@ -75,10 +71,7 @@ impl App {
     fn cells(&self) -> Vec<(f64, f64)> {
         // I chose not to implement Iterator as it would require tracking state and everything.
         // No fancy uses here this is just for the UI to know whick blocks to paint white
-        if self.state.is_empty() {
-            // Covers the initial struct state before first UI call, just in case
-            return Vec::<(f64, f64)>::new();
-        }
+	let y_offset = (self.dimensions.y - 1) as f64;  // Inverts y axis
         self.state
             .iter()
             .enumerate()
@@ -92,10 +85,10 @@ impl App {
     }
 
     fn add_cell(&mut self, pos: ClickPosition) {
-        self.state[pos.x as usize][pos.y as usize] = true;
+        self.state[pos.y as usize][pos.x as usize] = true;
     }
     fn remove_cell(&mut self, pos: ClickPosition) {
-        self.state[pos.x as usize][pos.y as usize] = false;
+        self.state[pos.y as usize][pos.x as usize] = false;
     }
 }
 
@@ -151,9 +144,39 @@ fn run_app<B: Backend>(
                 _ => {}
             },
 
-            GameEvent::LeftClick(position) if !app.running => app.add_cell(position),
+            GameEvent::LeftClick(position)
+                if !app.running
+                    && app.dimensions.intersects(Rect {
+                        x: position.x,
+                        y: position.y,
+                        width: 0,
+                        height: 0,
+                    }) =>
+            {
+                let x_offset = app.dimensions.x;
+                let y_offset = app.dimensions.y;
+                app.add_cell(ClickPosition {
+                    x: position.x - x_offset,
+                    y: position.y - y_offset,
+                })
+            }
 
-            GameEvent::RightClick(position) if !app.running => app.remove_cell(position),
+            GameEvent::RightClick(position)
+                if !app.running
+                    && app.dimensions.intersects(Rect {
+                        x: position.x,
+                        y: position.y,
+                        width: 0,
+                        height: 0,
+                    }) =>
+            {
+                let x_offset = app.dimensions.x;
+                let y_offset = app.dimensions.y;
+                app.remove_cell(ClickPosition {
+                    x: position.x - x_offset,
+                    y: position.y - y_offset,
+                })
+            }
 
             GameEvent::Tick => app.on_tick(),
             GameEvent::Resize(rect) => app.resize(rect),
