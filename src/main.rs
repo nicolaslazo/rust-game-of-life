@@ -1,5 +1,5 @@
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -14,23 +14,25 @@ use tui::{
     layout::Layout,
     layout::{Alignment, Constraint, Direction},
     style::Color,
-    symbols::Marker,
     text::{Span, Spans},
     widgets::{
         canvas::{Canvas, Points},
         Block, Borders, Paragraph,
     },
-    Terminal,
+    Frame, Terminal,
 };
 
-enum GameEvent<T> {
-    Input(T),
+enum GameEvent {
+    KeyInput(KeyEvent),
     Tick,
     Resize(usize, usize),
 }
 
 struct App {
     state: Vec<Vec<bool>>,
+    running: bool,
+    dimensions: Option<(usize, usize)>,
+    tick_rate: Duration,
 }
 
 impl App {
@@ -39,6 +41,9 @@ impl App {
             // Kind of sucks how the app starts in an invalid state that shouldn't exist
             // but we can't reserve any memory until the UI is initialised and we know our dimensions
             state: Vec::new(),
+            running: false,
+            dimensions: None,
+            tick_rate: Duration::from_millis(250),
         }
     }
 
@@ -77,7 +82,7 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     let app = App::new();
-    let res = run_app(&mut terminal, app, Duration::from_millis(250));
+    let res = run_app(&mut terminal, app);
 
     disable_raw_mode()?;
     execute!(
@@ -97,94 +102,32 @@ fn main() -> Result<(), Box<dyn error::Error>> {
 fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,
     mut app: App,
-    mut tick_rate: Duration,
 ) -> Result<(), Box<dyn error::Error>> {
-    let (tx, rx) = mpsc::channel();
+    let (mut tx, rx) = mpsc::channel();
 
-    let thread_tx = tx.clone();
-    thread::spawn(move || handle_game_events(thread_tx, tick_rate));
+    let event_handler_tx = tx.clone();
+    thread::spawn(move || handle_game_events(event_handler_tx, &app.tick_rate));
 
-    let mut current_game_dimensions: Option<(u16, u16)> = None;
-
-    let mut game_running = false;
     let mut exit = false;
 
     loop {
-        terminal.draw(|f| {
-            let chunks = Layout::default() // Basic layout
-                .direction(Direction::Horizontal)
-                .margin(2)
-                .constraints([Constraint::Percentage(85), Constraint::Percentage(15)].as_ref())
-                .split(f.size());
+        terminal.draw(|f| ui(f, &mut app, &mut tx))?;
 
-            let new_game_dimensions = (chunks[0].width, chunks[0].height); // Check for resize in the UI side
-            if Some(new_game_dimensions) != current_game_dimensions
-                && tx
-                    .send(GameEvent::Resize(
-                        new_game_dimensions.0.into(),
-                        new_game_dimensions.1.into(),
-                    ))
-                    .is_ok()
-            {
-                current_game_dimensions = Some(new_game_dimensions);
-            }
+        match rx.recv().unwrap() {
+            // GameEvent handler/consumer
+            GameEvent::KeyInput(event) => match event.code {
+                KeyCode::Char('+') => app.tick_rate += Duration::from_millis(10),
+                KeyCode::Char('-') => app.tick_rate -= Duration::from_millis(10),
+                KeyCode::Enter => app.running = !app.running,
 
-            let canvas = Canvas::default() // Game rendering
-                .marker(Marker::Block)
-                .block(Block::default().borders(Borders::ALL))
-                .paint(|ctx| {
-                    ctx.draw(&Points {
-                        coords: app.cells().as_slice(),
-                        color: Color::White,
-                    })
-                });
-            f.render_widget(canvas, chunks[0]);
+                KeyCode::Char('q') => exit = true,
 
-            let run_pause_str = match &game_running {
-                // Controls rendering
-                false => "  Run",
-                true => "  Pause",
-            };
+                _ => {}
+            },
 
-            let instructions = Paragraph::new(vec![
-                Spans::from(vec![Span::raw(" [Left click]")]),
-                Spans::from(vec![Span::raw("  Add cell")]),
-                Spans::from(vec![Span::raw("")]),
-                Spans::from(vec![Span::raw(" [Right click]")]),
-                Spans::from(vec![Span::raw("  Delete cell")]),
-                Spans::from(vec![Span::raw("")]),
-                Spans::from(vec![Span::raw(" [Enter]")]),
-                Spans::from(vec![Span::raw(run_pause_str)]),
-                Spans::from(vec![Span::raw("")]),
-                Spans::from(vec![Span::raw(" [-, +]")]),
-                Spans::from(vec![Span::raw(format!(
-                    "  Tick rate = {}",
-                    &tick_rate.as_millis()
-                ))]),
-                Spans::from(vec![Span::raw("")]),
-                Spans::from(vec![Span::raw(" [q]")]),
-                Spans::from(vec![Span::raw("  Exit")]),
-            ])
-            .alignment(Alignment::Left)
-            .block(Block::default().borders(Borders::ALL).title("Controls"));
-            f.render_widget(instructions, chunks[1]);
-
-            match rx.recv().unwrap() {
-                // GameEvent handler/consumer
-                GameEvent::Input(event) => match event.code {
-                    KeyCode::Char('+') => tick_rate += Duration::from_millis(10),
-                    KeyCode::Char('-') => tick_rate -= Duration::from_millis(10),
-                    KeyCode::Enter => game_running = !game_running,
-
-                    KeyCode::Char('q') => exit = true,
-
-                    _ => {}
-                },
-
-                GameEvent::Tick => app.on_tick(),
-                GameEvent::Resize(w, h) => app.resize(w, h),
-            }
-        })?;
+            GameEvent::Tick => app.on_tick(),
+            GameEvent::Resize(w, h) => app.resize(w, h),
+        }
 
         if exit {
             break;
@@ -193,7 +136,7 @@ fn run_app<B: Backend>(
     Ok(())
 }
 
-fn handle_game_events(tx: Sender<GameEvent<event::KeyEvent>>, tick_rate: Duration) {
+fn handle_game_events(tx: Sender<GameEvent>, tick_rate: &Duration) {
     // Reads for inputs and generates ticks
     let mut last_tick = Instant::now();
 
@@ -204,13 +147,74 @@ fn handle_game_events(tx: Sender<GameEvent<event::KeyEvent>>, tick_rate: Duratio
 
         if event::poll(timeout).expect("Events are properly polled") {
             if let Event::Key(key) = event::read().expect("Key inputs are detected") {
-                tx.send(GameEvent::Input(key))
+                tx.send(GameEvent::KeyInput(key))
                     .expect("GameEvent inputs can be sent to the consumer");
             }
         }
 
-        if last_tick.elapsed() >= tick_rate && tx.send(GameEvent::Tick).is_ok() {
+        if last_tick.elapsed() >= *tick_rate && tx.send(GameEvent::Tick).is_ok() {
             last_tick = Instant::now()
         }
     }
+}
+
+fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App, event_tx: &mut Sender<GameEvent>) {
+    let chunks = Layout::default() // Basic layout
+        .direction(Direction::Horizontal)
+        .margin(2)
+        .constraints([Constraint::Percentage(85), Constraint::Percentage(15)].as_ref())
+        .split(f.size());
+
+    let new_game_dimensions = (chunks[0].width as usize, chunks[0].height as usize);
+    if Some(new_game_dimensions) != app.dimensions
+        && event_tx
+            .send(GameEvent::Resize(
+                new_game_dimensions.0,
+                new_game_dimensions.1,
+            ))
+            .is_ok()
+    {
+        app.dimensions = Some(new_game_dimensions);
+    }
+
+    let canvas = Canvas::default() // Game rendering
+        .block(Block::default().borders(Borders::ALL))
+        .marker(tui::symbols::Marker::Braille)
+        .paint(|ctx| {
+            ctx.draw(&Points {
+                coords: app.cells().as_slice(),
+                color: Color::White,
+            });
+        });
+    f.render_widget(canvas, chunks[0]);
+
+    let run_pause_str = match app.running {
+        // Controls rendering
+        false => "  Run",
+        true => "  Pause",
+    };
+
+    let instructions = Paragraph::new(vec![
+        Spans::from(vec![Span::raw(format!("{:?}", app.cells().as_slice()))]),
+        Spans::from(vec![Span::raw(" [Left click]")]),
+        Spans::from(vec![Span::raw("  Add cell")]),
+        Spans::from(vec![Span::raw("")]),
+        Spans::from(vec![Span::raw(" [Right click]")]),
+        Spans::from(vec![Span::raw("  Delete cell")]),
+        Spans::from(vec![Span::raw("")]),
+        Spans::from(vec![Span::raw(" [Enter]")]),
+        Spans::from(vec![Span::raw(run_pause_str)]),
+        Spans::from(vec![Span::raw("")]),
+        Spans::from(vec![Span::raw(" [-, +]")]),
+        Spans::from(vec![Span::raw(format!(
+            "  Tick rate = {}",
+            app.tick_rate.as_millis()
+        ))]),
+        Spans::from(vec![Span::raw("")]),
+        Spans::from(vec![Span::raw(" [q]")]),
+        Spans::from(vec![Span::raw("  Exit")]),
+    ])
+    .alignment(Alignment::Left)
+    .block(Block::default().borders(Borders::ALL).title("Controls"));
+    f.render_widget(instructions, chunks[1]);
 }
