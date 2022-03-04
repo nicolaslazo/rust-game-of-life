@@ -7,10 +7,10 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::{
-    error, io,
+    error, io::{self, Write},
     sync::mpsc::{self, Sender},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant}, fs::File, os::unix::prelude::FileExt,
 };
 use tui::{
     backend::{Backend, CrosstermBackend},
@@ -43,6 +43,7 @@ struct App {
     running: bool,
     dimensions: Rect,
     tick_rate: Duration,
+    last_click: (usize, usize),
 }
 
 impl App {
@@ -53,12 +54,22 @@ impl App {
             .constraints([Constraint::Percentage(85), Constraint::Percentage(15)].as_ref())
             .split(frame.size())[0];
 
-        App {
+        let mut retval = App {
             state: vec![vec![false; dimensions.width.into()]; dimensions.height.into()],
             running: false,
             dimensions,
             tick_rate: Duration::from_millis(250),
-        }
+            last_click: (0, 0),
+        };
+
+	for y in 0..retval.state.len() {
+	    retval.state[y][y] = true;
+	}
+
+	let mut file = File::create("dump.txt").expect("xD");
+	file.write(format!("{:?}", retval.cells()).as_bytes());
+
+	return retval
     }
 
     fn resize(&mut self, rect: Rect) {
@@ -71,8 +82,7 @@ impl App {
     fn cells(&self) -> Vec<(f64, f64)> {
         // I chose not to implement Iterator as it would require tracking state and everything.
         // No fancy uses here this is just for the UI to know whick blocks to paint white
-	let y_offset = (self.dimensions.y - 1) as f64;  // Inverts y axis
-        self.state
+        let retval: Vec<(f64, f64)> = self.state
             .iter()
             .enumerate()
             .flat_map(move |(row_i, row)| {
@@ -81,7 +91,10 @@ impl App {
                     .filter(|(_, cell)| **cell)
                     .map(move |(cell_i, _)| (cell_i as f64, row_i as f64))
             })
-            .collect()
+            .collect();
+
+
+	return retval;
     }
 
     fn add_cell(&mut self, pos: ClickPosition) {
@@ -155,9 +168,10 @@ fn run_app<B: Backend>(
             {
                 let x_offset = app.dimensions.x;
                 let y_offset = app.dimensions.y;
+		app.last_click = (position.x as usize, position.y as usize);
                 app.add_cell(ClickPosition {
                     x: position.x - x_offset,
-                    y: position.y - y_offset,
+                    y: terminal.size().unwrap().height - position.y - y_offset, // Invert Y axis coords
                 })
             }
 
@@ -270,7 +284,9 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App, event_tx: &mut Sender<GameEve
     };
 
     let instructions = Paragraph::new(vec![
-        Spans::from(vec![Span::raw(format!("{:?}", app.cells().as_slice()))]),
+        Spans::from(vec![Span::raw(format!("{:?}", app.last_click))]),
+        Spans::from(vec![Span::raw(format!("{:?}", app.state.len()))]),
+        Spans::from(vec![Span::raw(format!("{:?}", app.cells()))]),
         Spans::from(vec![Span::raw(" [Left click]")]),
         Spans::from(vec![Span::raw("  Add cell")]),
         Spans::from(vec![Span::raw("")]),
