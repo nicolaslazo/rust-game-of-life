@@ -7,21 +7,18 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::{
-    error, io::{self, Write},
+    error, io,
     sync::mpsc::{self, Sender},
     thread,
-    time::{Duration, Instant}, fs::File, os::unix::prelude::FileExt,
+    time::{Duration, Instant},
 };
 use tui::{
     backend::{Backend, CrosstermBackend},
     layout::Layout,
     layout::{Alignment, Constraint, Direction, Rect},
-    style::Color,
+    style::{Modifier, Style},
     text::{Span, Spans},
-    widgets::{
-        canvas::{Canvas, Points},
-        Block, Borders, Paragraph,
-    },
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame, Terminal,
 };
 
@@ -54,22 +51,13 @@ impl App {
             .constraints([Constraint::Percentage(85), Constraint::Percentage(15)].as_ref())
             .split(frame.size())[0];
 
-        let mut retval = App {
-            state: vec![vec![false; dimensions.width.into()]; dimensions.height.into()],
+        App {
+            state: vec![vec![false; dimensions.width as usize - 1]; dimensions.height as usize - 1],
             running: false,
             dimensions,
             tick_rate: Duration::from_millis(250),
             last_click: (0, 0),
-        };
-
-	for y in 0..retval.state.len() {
-	    retval.state[y][y] = true;
-	}
-
-	let mut file = File::create("dump.txt").expect("xD");
-	file.write(format!("{:?}", retval.cells()).as_bytes());
-
-	return retval
+        }
     }
 
     fn resize(&mut self, rect: Rect) {
@@ -78,24 +66,6 @@ impl App {
     }
 
     fn on_tick(&mut self) {}
-
-    fn cells(&self) -> Vec<(f64, f64)> {
-        // I chose not to implement Iterator as it would require tracking state and everything.
-        // No fancy uses here this is just for the UI to know whick blocks to paint white
-        let retval: Vec<(f64, f64)> = self.state
-            .iter()
-            .enumerate()
-            .flat_map(move |(row_i, row)| {
-                row.iter()
-                    .enumerate()
-                    .filter(|(_, cell)| **cell)
-                    .map(move |(cell_i, _)| (cell_i as f64, row_i as f64))
-            })
-            .collect();
-
-
-	return retval;
-    }
 
     fn add_cell(&mut self, pos: ClickPosition) {
         self.state[pos.y as usize][pos.x as usize] = true;
@@ -166,12 +136,12 @@ fn run_app<B: Backend>(
                         height: 0,
                     }) =>
             {
-                let x_offset = app.dimensions.x;
-                let y_offset = app.dimensions.y;
-		app.last_click = (position.x as usize, position.y as usize);
+                let x_offset = app.dimensions.x + 1;
+                let y_offset = app.dimensions.y + 1;
+                app.last_click = (position.x as usize, position.y as usize);
                 app.add_cell(ClickPosition {
                     x: position.x - x_offset,
-                    y: terminal.size().unwrap().height - position.y - y_offset, // Invert Y axis coords
+                    y: position.y - y_offset,
                 })
             }
 
@@ -184,8 +154,8 @@ fn run_app<B: Backend>(
                         height: 0,
                     }) =>
             {
-                let x_offset = app.dimensions.x;
-                let y_offset = app.dimensions.y;
+                let x_offset = app.dimensions.x + 1;
+                let y_offset = app.dimensions.y + 1;
                 app.remove_cell(ClickPosition {
                     x: position.x - x_offset,
                     y: position.y - y_offset,
@@ -264,18 +234,28 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App, event_tx: &mut Sender<GameEve
             .expect("Can send resize events");
     }
 
-    let canvas = Canvas::default() // Game rendering
-        .block(Block::default().borders(Borders::ALL))
-        .x_bounds([0., app.dimensions.right() as f64])
-        .y_bounds([0., app.dimensions.bottom() as f64])
-        .marker(tui::symbols::Marker::Block)
-        .paint(|ctx| {
-            ctx.draw(&Points {
-                coords: app.cells().as_slice(),
-                color: Color::White,
-            });
-        });
-    f.render_widget(canvas, chunks[0]);
+    let game = Paragraph::new(vec![Spans::from(vec![Span::styled(
+        format!(
+            "{}",
+            app.state
+                .iter()
+                .flat_map(|row| {
+                    row.iter().map(|x| {
+                        if *x {
+                            return "█";
+                        }
+                        " "
+                    })
+                })
+                .collect::<String>()
+        ),
+        Style::default().add_modifier(Modifier::BOLD),
+    )])])
+    .alignment(Alignment::Left)
+    .block(Block::default().borders(Borders::ALL))
+    .wrap(Wrap { trim: false });
+
+    f.render_widget(game, chunks[0]);
 
     let run_pause_str = match app.running {
         // Controls rendering
@@ -284,9 +264,19 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App, event_tx: &mut Sender<GameEve
     };
 
     let instructions = Paragraph::new(vec![
+        Spans::from(vec![Span::raw(format!("{:?}", app.dimensions))]),
+        Spans::from(vec![Span::raw(format!(
+            "{:?}",
+            (app.state.len(), app.state[0].len())
+        ))]),
         Spans::from(vec![Span::raw(format!("{:?}", app.last_click))]),
-        Spans::from(vec![Span::raw(format!("{:?}", app.state.len()))]),
-        Spans::from(vec![Span::raw(format!("{:?}", app.cells()))]),
+        Spans::from(vec![Span::raw(format!(
+            "{}",
+            app.state
+                .iter()
+                .map(|row| row.iter().filter(|x| **x).count())
+                .sum::<usize>()
+        ))]),
         Spans::from(vec![Span::raw(" [Left click]")]),
         Spans::from(vec![Span::raw("  Add cell")]),
         Spans::from(vec![Span::raw("")]),
