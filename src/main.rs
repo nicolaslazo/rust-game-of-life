@@ -15,17 +15,34 @@ use std::{
 use tui::{
     backend::{Backend, CrosstermBackend},
     layout::Layout,
-    layout::{Alignment, Constraint, Direction, Rect},
+    layout::{Alignment, Constraint, Direction, Margin, Rect},
     style::{Modifier, Style},
     text::{Span, Spans},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame, Terminal,
 };
 
-struct ClickPosition {
+const THIN_MARGIN: &Margin = &Margin {
+    horizontal: 1,
+    vertical: 1,
+};
+
+#[derive(Copy, Clone)]
+struct Point {
     x: u16,
     y: u16,
 }
+
+impl Point {
+    fn in_rect(self, rect: Rect) -> bool {
+        self.x >= rect.x
+            && self.x < rect.x + rect.width
+            && self.y >= rect.y
+            && self.y < rect.y + rect.height
+    }
+}
+
+type ClickPosition = Point;
 
 enum GameEvent {
     KeyInput(KeyEvent),
@@ -49,23 +66,100 @@ impl App {
             .direction(Direction::Horizontal)
             .margin(2)
             .constraints([Constraint::Percentage(85), Constraint::Percentage(15)].as_ref())
-            .split(frame.size())[0];
+            .split(frame.size())[0]
+            .inner(THIN_MARGIN);
 
         App {
-            state: vec![vec![false; dimensions.width as usize - 1]; dimensions.height as usize - 1],
+            state: vec![vec![false; dimensions.width as usize + 1]; dimensions.height as usize + 1],
             running: false,
             dimensions,
             tick_rate: Duration::from_millis(250),
+            // For debugging purposes, delete later
             last_click: (0, 0),
         }
     }
 
     fn resize(&mut self, rect: Rect) {
-        self.state = vec![vec![false; rect.width.into()]; rect.height.into()];
-        self.dimensions = rect;
+        // we need to remove borders, again
+        self.dimensions = rect.inner(THIN_MARGIN);
+        self.state =
+            vec![vec![false; self.dimensions.width as usize]; self.dimensions.height as usize];
     }
 
-    fn on_tick(&mut self) {}
+    fn on_tick(&mut self) {
+        if !self.running {
+            return;
+        }
+        // We don't want to effect any changes until all cells are evaluated
+        let mut to_flip: Vec<(usize, usize)> = Vec::new();
+        for (row_idx, row) in self.state.iter().enumerate() {
+            for (col_idx, cell) in row.iter().enumerate() {
+                // The data type wrangling in this area is atrocious, I wonder if there's any way to fix it
+                // The + self.dimensions.w/h is to prevent overflow, not required for adding
+                let neighbour_idxs = {
+                    let top_row_idx = (row_idx + self.dimensions.height as usize - 1)
+                        % self.dimensions.height as usize;
+                    let bottom_row_idx = (row_idx as usize + 1) % self.dimensions.height as usize;
+                    let left_col_idx = (col_idx + self.dimensions.width as usize - 1)
+                        % self.dimensions.width as usize;
+                    let right_col_idx = (col_idx as usize + 1) % self.dimensions.width as usize;
+
+                    [
+                        (top_row_idx, left_col_idx),
+                        (top_row_idx, col_idx),
+                        (top_row_idx, right_col_idx),
+                        (row_idx, left_col_idx),
+                        (row_idx, right_col_idx),
+                        (bottom_row_idx, left_col_idx),
+                        (bottom_row_idx, col_idx),
+                        (bottom_row_idx, right_col_idx),
+                    ]
+                };
+
+                let live_neighbour_count = neighbour_idxs
+                    .iter()
+                    .filter(|(nbr_row_idx, nbr_col_idx)| self.state[*nbr_row_idx][*nbr_col_idx])
+                    .count();
+
+                let mut flip_this = false;
+                match (cell, live_neighbour_count) {
+                    /* By this point the formatting or the game rules is starting to look weird,
+                      but I can defend my decisions.
+
+                      Why I don't like particularly is how I'm using a match statement which leads
+                      to one of two possible decisions: set needs_flip to true, or do nothing.
+                      Doing one thing or nothing (and skipping all the extra conditionals once we
+                      reach a truthy evaluation) sounds like the job for a if/else if decision tree.
+                      I wanted to go with a match because the pattern matching and guards make for
+                      an idiomatic overview of the game rules.
+
+                      If we decide to settle on a match then its more idiomatic use would be to set
+                      the literal boolean for each cell in self.state, but that would involve
+                      a lot of unnecessary writes to the Vec.
+
+                      The flip_this boolean could be made redundant by push to to_flip
+                      directly but that would clutter the match.
+
+                      Any potential implementation would be faster and cleaner to implement
+                      than taking the time to write this comment.
+                      But this is a learning experience, and I'm a perfectionist.
+                    */
+                    (true, count) if count < 2 => flip_this = true, // Underpopulation
+                    (true, count) if count > 3 => flip_this = true, // Overpopulation
+                    (false, count) if count == 3 => flip_this = true, // Reproduction
+                    (_, _) => {}
+                }
+
+                if flip_this {
+                    to_flip.push((row_idx, col_idx))
+                }
+            }
+        }
+
+        to_flip.iter().for_each(|(row_idx, col_idx)| {
+            self.state[*row_idx][*col_idx] = !self.state[*row_idx][*col_idx]
+        });
+    }
 
     fn add_cell(&mut self, pos: ClickPosition) {
         self.state[pos.y as usize][pos.x as usize] = true;
@@ -119,7 +213,11 @@ fn run_app<B: Backend>(
             // GameEvent handler/consumer
             GameEvent::KeyInput(event) => match event.code {
                 KeyCode::Char('+') => app.tick_rate += Duration::from_millis(10),
-                KeyCode::Char('-') => app.tick_rate -= Duration::from_millis(10),
+                KeyCode::Char('-') => {
+                    if app.tick_rate > Duration::from_millis(10) {
+                        app.tick_rate -= Duration::from_millis(10)
+                    }
+                }
                 KeyCode::Enter => app.running = !app.running,
 
                 KeyCode::Char('q') => exit = true,
@@ -127,17 +225,9 @@ fn run_app<B: Backend>(
                 _ => {}
             },
 
-            GameEvent::LeftClick(position)
-                if !app.running
-                    && app.dimensions.intersects(Rect {
-                        x: position.x,
-                        y: position.y,
-                        width: 0,
-                        height: 0,
-                    }) =>
-            {
-                let x_offset = app.dimensions.x + 1;
-                let y_offset = app.dimensions.y + 1;
+            GameEvent::LeftClick(position) if !app.running && position.in_rect(app.dimensions) => {
+                let x_offset = app.dimensions.x;
+                let y_offset = app.dimensions.y;
                 app.last_click = (position.x as usize, position.y as usize);
                 app.add_cell(ClickPosition {
                     x: position.x - x_offset,
@@ -145,17 +235,9 @@ fn run_app<B: Backend>(
                 })
             }
 
-            GameEvent::RightClick(position)
-                if !app.running
-                    && app.dimensions.intersects(Rect {
-                        x: position.x,
-                        y: position.y,
-                        width: 0,
-                        height: 0,
-                    }) =>
-            {
-                let x_offset = app.dimensions.x + 1;
-                let y_offset = app.dimensions.y + 1;
+            GameEvent::RightClick(position) if !app.running && position.in_rect(app.dimensions) => {
+                let x_offset = app.dimensions.x;
+                let y_offset = app.dimensions.y;
                 app.remove_cell(ClickPosition {
                     x: position.x - x_offset,
                     y: position.y - y_offset,
@@ -228,27 +310,27 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App, event_tx: &mut Sender<GameEve
         .constraints([Constraint::Percentage(85), Constraint::Percentage(15)].as_ref())
         .split(f.size());
 
-    if chunks[0] != app.dimensions {
+    if chunks[0].inner(THIN_MARGIN) != app.dimensions {
         event_tx
             .send(GameEvent::Resize(chunks[0]))
             .expect("Can send resize events");
     }
 
+    /* A tui-rs Canvas sounds like the more obvious tool for this case
+      but that dot system doesn't conform to a simple grid system like Paragrah does
+    */
     let game = Paragraph::new(vec![Spans::from(vec![Span::styled(
-        format!(
-            "{}",
-            app.state
-                .iter()
-                .flat_map(|row| {
-                    row.iter().map(|x| {
-                        if *x {
-                            return "█";
-                        }
-                        " "
-                    })
+        app.state
+            .iter()
+            .flat_map(|row| {
+                row.iter().map(|x| {
+                    if *x {
+                        return "█";
+                    }
+                    " "
                 })
-                .collect::<String>()
-        ),
+            })
+            .collect::<String>(),
         Style::default().add_modifier(Modifier::BOLD),
     )])])
     .alignment(Alignment::Left)
@@ -264,7 +346,10 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App, event_tx: &mut Sender<GameEve
     };
 
     let instructions = Paragraph::new(vec![
-        Spans::from(vec![Span::raw(format!("{:?}", app.dimensions))]),
+        Spans::from(vec![Span::raw(format!("{:?}", app.dimensions.x))]),
+        Spans::from(vec![Span::raw(format!("{:?}", app.dimensions.y))]),
+        Spans::from(vec![Span::raw(format!("{:?}", app.dimensions.width))]),
+        Spans::from(vec![Span::raw(format!("{:?}", app.dimensions.height))]),
         Spans::from(vec![Span::raw(format!(
             "{:?}",
             (app.state.len(), app.state[0].len())
