@@ -50,16 +50,21 @@ enum ClickType {
     Right,
 }
 
+const DEFAULT_TICK: Duration = Duration::from_millis(250);
+const TICK_STEP: Duration = Duration::from_millis(10);
+
 enum GameEvent {
     KeyInput(KeyEvent),
     Click(ClickType, ClickPosition),
     Tick,
+    TickSet(Duration),
     Resize(Rect),
 }
 
 struct App {
     state: Vec<Vec<bool>>,
     running: bool,
+    tick_rate: Duration,
     dimensions: Rect,
     last_click: (usize, usize),
 }
@@ -76,6 +81,7 @@ impl App {
         App {
             state: vec![vec![false; dimensions.width as usize + 1]; dimensions.height as usize + 1],
             running: false,
+            tick_rate: DEFAULT_TICK,
             dimensions,
             // TODO: For debugging purposes, delete later
             last_click: (0, 0),
@@ -241,6 +247,7 @@ fn run_app<B: Backend>(
             }
 
             GameEvent::Tick => app.on_tick(),
+            GameEvent::TickSet(new_tick_rate) => app.tick_rate = new_tick_rate,
             GameEvent::Resize(rect) => app.resize(rect),
 
             _ => {}
@@ -255,7 +262,7 @@ fn run_app<B: Backend>(
 
 fn handle_game_events(tx: Sender<GameEvent>) {
     // Reads for inputs and generates ticks
-    let mut tick_rate = Duration::from_millis(250);
+    let mut tick_rate = DEFAULT_TICK;
     let mut last_tick = Instant::now();
 
     loop {
@@ -266,11 +273,20 @@ fn handle_game_events(tx: Sender<GameEvent>) {
         if event::poll(timeout).expect("Events are properly polled") {
             match event::read().expect("Key inputs are detected") {
                 Event::Key(key) => match key.code {
-                    KeyCode::Char('+') => tick_rate += Duration::from_millis(10),
+                    KeyCode::Char('+') => {
+                        tick_rate += TICK_STEP;
+
+                        tx.send(GameEvent::TickSet(tick_rate))
+                            .expect("Can increase tick rate");
+                    }
                     KeyCode::Char('-') => {
-                        if tick_rate > Duration::from_millis(10) {
-                            tick_rate -= Duration::from_millis(10)
+                        if tick_rate > Duration::from_millis(30) {
+                            // TODO: Figure out a way to drop events so the buffer doesn't get clogged with ticks at really high rates
+                            tick_rate -= TICK_STEP
                         }
+
+                        tx.send(GameEvent::TickSet(tick_rate))
+                            .expect("Can increase tick rate");
                     }
                     _ => tx
                         .send(GameEvent::KeyInput(key))
@@ -290,6 +306,7 @@ fn handle_game_events(tx: Sender<GameEvent>) {
                     } else {
                         ClickType::Right
                     };
+
                     tx.send(GameEvent::Click(
                         click_type,
                         ClickPosition { x: column, y: row },
@@ -376,12 +393,10 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App, event_tx: &mut Sender<GameEve
         Spans::from(vec![Span::raw(run_pause_str)]),
         Spans::from(vec![Span::raw("")]),
         Spans::from(vec![Span::raw(" [-, +]")]),
-        /*
-            Spans::from(vec![Span::raw(format!(
-                "  Tick rate = {}",
-                app.tick_rate.as_millis()
-            ))]),
-        */
+        Spans::from(vec![Span::raw(format!(
+            "  Tick rate = {}",
+            app.tick_rate.as_millis()
+        ))]),
         Spans::from(vec![Span::raw("")]),
         Spans::from(vec![Span::raw(" [q]")]),
         Spans::from(vec![Span::raw("  Exit")]),
