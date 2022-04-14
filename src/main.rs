@@ -43,11 +43,16 @@ impl Point {
 }
 
 type ClickPosition = Point;
+// Crossterm's alternatives are too verbose. Let's strip down all unnecessary complexity as soon as possible
+#[derive(PartialEq)]
+enum ClickType {
+    Left,
+    Right,
+}
 
 enum GameEvent {
     KeyInput(KeyEvent),
-    LeftClick(ClickPosition),
-    RightClick(ClickPosition),
+    Click(ClickType, ClickPosition),
     Tick,
     Resize(Rect),
 }
@@ -56,7 +61,6 @@ struct App {
     state: Vec<Vec<bool>>,
     running: bool,
     dimensions: Rect,
-    tick_rate: Duration,
     last_click: (usize, usize),
 }
 
@@ -73,8 +77,7 @@ impl App {
             state: vec![vec![false; dimensions.width as usize + 1]; dimensions.height as usize + 1],
             running: false,
             dimensions,
-            tick_rate: Duration::from_millis(250),
-            // For debugging purposes, delete later
+            // TODO: For debugging purposes, delete later
             last_click: (0, 0),
         }
     }
@@ -202,7 +205,7 @@ fn run_app<B: Backend>(
     let (mut tx, rx) = mpsc::channel();
 
     let event_handler_tx = tx.clone();
-    thread::spawn(move || handle_game_events(event_handler_tx, &app.tick_rate));
+    thread::spawn(move || handle_game_events(event_handler_tx));
 
     let mut exit = false;
 
@@ -212,12 +215,6 @@ fn run_app<B: Backend>(
         match rx.recv().unwrap() {
             // GameEvent handler/consumer
             GameEvent::KeyInput(event) => match event.code {
-                KeyCode::Char('+') => app.tick_rate += Duration::from_millis(10),
-                KeyCode::Char('-') => {
-                    if app.tick_rate > Duration::from_millis(10) {
-                        app.tick_rate -= Duration::from_millis(10)
-                    }
-                }
                 KeyCode::Enter => app.running = !app.running,
 
                 KeyCode::Char('q') => exit = true,
@@ -225,23 +222,22 @@ fn run_app<B: Backend>(
                 _ => {}
             },
 
-            GameEvent::LeftClick(position) if !app.running && position.in_rect(app.dimensions) => {
+            GameEvent::Click(button, position)
+                if !app.running && position.in_rect(app.dimensions) =>
+            {
                 let x_offset = app.dimensions.x;
                 let y_offset = app.dimensions.y;
+                let offset_position = ClickPosition {
+                    x: position.x - x_offset,
+                    y: position.y - y_offset,
+                };
                 app.last_click = (position.x as usize, position.y as usize);
-                app.add_cell(ClickPosition {
-                    x: position.x - x_offset,
-                    y: position.y - y_offset,
-                })
-            }
 
-            GameEvent::RightClick(position) if !app.running && position.in_rect(app.dimensions) => {
-                let x_offset = app.dimensions.x;
-                let y_offset = app.dimensions.y;
-                app.remove_cell(ClickPosition {
-                    x: position.x - x_offset,
-                    y: position.y - y_offset,
-                })
+                if button == ClickType::Left {
+                    app.add_cell(offset_position);
+                } else {
+                    app.remove_cell(offset_position);
+                }
             }
 
             GameEvent::Tick => app.on_tick(),
@@ -257,8 +253,9 @@ fn run_app<B: Backend>(
     Ok(())
 }
 
-fn handle_game_events(tx: Sender<GameEvent>, tick_rate: &Duration) {
+fn handle_game_events(tx: Sender<GameEvent>) {
     // Reads for inputs and generates ticks
+    let mut tick_rate = Duration::from_millis(250);
     let mut last_tick = Instant::now();
 
     loop {
@@ -268,36 +265,43 @@ fn handle_game_events(tx: Sender<GameEvent>, tick_rate: &Duration) {
 
         if event::poll(timeout).expect("Events are properly polled") {
             match event::read().expect("Key inputs are detected") {
-                Event::Key(key) => {
-                    tx.send(GameEvent::KeyInput(key))
-                        .expect("GameEvent keys can be sent to the consumer");
-                }
+                Event::Key(key) => match key.code {
+                    KeyCode::Char('+') => tick_rate += Duration::from_millis(10),
+                    KeyCode::Char('-') => {
+                        if tick_rate > Duration::from_millis(10) {
+                            tick_rate -= Duration::from_millis(10)
+                        }
+                    }
+                    _ => tx
+                        .send(GameEvent::KeyInput(key))
+                        .expect("GameEvent keys can be sent to the consumer"),
+                },
 
                 Event::Mouse(MouseEvent {
-                    kind: MouseEventKind::Down(MouseButton::Left),
+                    kind:
+                        button @ (MouseEventKind::Down(MouseButton::Left)
+                        | MouseEventKind::Down(MouseButton::Right)),
                     column,
                     row,
                     ..
                 }) => {
-                    tx.send(GameEvent::LeftClick(ClickPosition { x: column, y: row }))
-                        .expect("Left clicks can be sent to the consumer");
-                }
-
-                Event::Mouse(MouseEvent {
-                    kind: MouseEventKind::Down(MouseButton::Right),
-                    column,
-                    row,
-                    ..
-                }) => {
-                    tx.send(GameEvent::RightClick(ClickPosition { x: column, y: row }))
-                        .expect("Right clicks can be sent to the consumer");
+                    let click_type = if button == MouseEventKind::Down(MouseButton::Left) {
+                        ClickType::Left
+                    } else {
+                        ClickType::Right
+                    };
+                    tx.send(GameEvent::Click(
+                        click_type,
+                        ClickPosition { x: column, y: row },
+                    ))
+                    .expect("Clicks can be sent to the consumer");
                 }
 
                 _ => {}
             }
         }
 
-        if last_tick.elapsed() >= *tick_rate && tx.send(GameEvent::Tick).is_ok() {
+        if last_tick.elapsed() >= tick_rate && tx.send(GameEvent::Tick).is_ok() {
             last_tick = Instant::now()
         }
     }
@@ -372,10 +376,12 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App, event_tx: &mut Sender<GameEve
         Spans::from(vec![Span::raw(run_pause_str)]),
         Spans::from(vec![Span::raw("")]),
         Spans::from(vec![Span::raw(" [-, +]")]),
-        Spans::from(vec![Span::raw(format!(
-            "  Tick rate = {}",
-            app.tick_rate.as_millis()
-        ))]),
+        /*
+            Spans::from(vec![Span::raw(format!(
+                "  Tick rate = {}",
+                app.tick_rate.as_millis()
+            ))]),
+        */
         Spans::from(vec![Span::raw("")]),
         Spans::from(vec![Span::raw(" [q]")]),
         Spans::from(vec![Span::raw("  Exit")]),
