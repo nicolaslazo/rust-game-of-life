@@ -90,15 +90,22 @@ impl App {
 
     fn resize(&mut self, rect: Rect) {
         // we need to remove borders, again
-        self.dimensions = rect.inner(THIN_MARGIN);
-        self.state =
-            vec![vec![false; self.dimensions.width as usize]; self.dimensions.height as usize];
+        let dimensions = rect.inner(THIN_MARGIN);
+
+        *self = App {
+            state: vec![vec![false; dimensions.width as usize + 1]; dimensions.height as usize + 1],
+            running: false,
+            tick_rate: self.tick_rate,
+            dimensions,
+            last_click: self.last_click,
+        }
     }
 
     fn on_tick(&mut self) {
         if !self.running {
             return;
         }
+
         // We don't want to effect any changes until all cells are evaluated
         let mut to_flip: Vec<(usize, usize)> = Vec::new();
         for (row_idx, row) in self.state.iter().enumerate() {
