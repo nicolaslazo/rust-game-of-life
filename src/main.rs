@@ -374,22 +374,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App, event_tx: &mut Sender<GameEve
     };
 
     let instructions = Paragraph::new(vec![
-        Spans::from(vec![Span::raw(format!("{:?}", app.dimensions.x))]),
-        Spans::from(vec![Span::raw(format!("{:?}", app.dimensions.y))]),
-        Spans::from(vec![Span::raw(format!("{:?}", app.dimensions.width))]),
-        Spans::from(vec![Span::raw(format!("{:?}", app.dimensions.height))]),
-        Spans::from(vec![Span::raw(format!(
-            "{:?}",
-            (app.state.len(), app.state[0].len())
-        ))]),
-        Spans::from(vec![Span::raw(format!("{:?}", app.last_click))]),
-        Spans::from(vec![Span::raw(format!(
-            "{}",
-            app.state
-                .iter()
-                .map(|row| row.iter().filter(|x| **x).count())
-                .sum::<usize>()
-        ))]),
+        Spans::from(vec![Span::raw("")]),
         Spans::from(vec![Span::raw(" [Left click]")]),
         Spans::from(vec![Span::raw("  Add cell")]),
         Spans::from(vec![Span::raw("")]),
@@ -401,7 +386,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App, event_tx: &mut Sender<GameEve
         Spans::from(vec![Span::raw("")]),
         Spans::from(vec![Span::raw(" [-, +]")]),
         Spans::from(vec![Span::raw(format!(
-            "  Tick rate = {}",
+            "  Tick rate = {}ms",
             app.tick_rate.as_millis()
         ))]),
         Spans::from(vec![Span::raw("")]),
